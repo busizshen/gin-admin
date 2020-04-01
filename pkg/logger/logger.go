@@ -3,22 +3,17 @@ package logger
 import (
 	"context"
 	"io"
-	"sync/atomic"
-	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
 // 定义键名
 const (
-	StartedAtKey     = "started_at"
-	TraceIDKey       = "trace_id"
-	UserIDKey        = "user_id"
-	SpanIDKey        = "span_id"
-	SpanTitleKey     = "span_title"
-	SpanFunctionKey  = "span_function"
-	VersionKey       = "version"
-	TimeConsumingKey = "time_consuming"
+	TraceIDKey      = "trace_id"
+	UserIDKey       = "user_id"
+	SpanTitleKey    = "span_title"
+	SpanFunctionKey = "span_function"
+	VersionKey      = "version"
 )
 
 // TraceIDFunc 定义获取跟踪ID的函数
@@ -79,7 +74,7 @@ func getTraceID() string {
 	if traceIDFunc != nil {
 		return traceIDFunc()
 	}
-	return time.Now().Format("2006.01.02.15.04.05.000")
+	return ""
 }
 
 type (
@@ -104,22 +99,6 @@ func FromTraceIDContext(ctx context.Context) string {
 	return getTraceID()
 }
 
-// NewSpanIDContext 创建跟踪单元ID上下文
-func NewSpanIDContext(ctx context.Context, spanID string) context.Context {
-	return context.WithValue(ctx, spanIDContextKey{}, spanID)
-}
-
-// FromSpanIDContext 从上下文中获取跟踪单元ID
-func FromSpanIDContext(ctx context.Context) string {
-	v := ctx.Value(spanIDContextKey{})
-	if v != nil {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return getTraceID()
-}
-
 // NewUserIDContext 创建用户ID上下文
 func NewUserIDContext(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, userIDContextKey{}, userID)
@@ -136,26 +115,89 @@ func FromUserIDContext(ctx context.Context) string {
 	return ""
 }
 
+type spanOptions struct {
+	Title    string
+	FuncName string
+}
+
+// SpanOption 定义跟踪单元的数据项
+type SpanOption func(*spanOptions)
+
+// SetSpanTitle 设置跟踪单元的标题
+func SetSpanTitle(title string) SpanOption {
+	return func(o *spanOptions) {
+		o.Title = title
+	}
+}
+
+// SetSpanFuncName 设置跟踪单元的函数名
+func SetSpanFuncName(funcName string) SpanOption {
+	return func(o *spanOptions) {
+		o.FuncName = funcName
+	}
+}
+
 // StartSpan 开始一个追踪单元
-func StartSpan(ctx context.Context, title, funcName string) *Entry {
+func StartSpan(ctx context.Context, opts ...SpanOption) *Entry {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var o spanOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	fields := map[string]interface{}{
-		StartedAtKey:    time.Now(),
-		UserIDKey:       FromUserIDContext(ctx),
-		TraceIDKey:      FromTraceIDContext(ctx),
-		SpanIDKey:       FromSpanIDContext(ctx),
-		SpanTitleKey:    title,
-		SpanFunctionKey: funcName,
-		VersionKey:      version,
+		UserIDKey:  FromUserIDContext(ctx),
+		TraceIDKey: FromTraceIDContext(ctx),
+		VersionKey: version,
+	}
+	if v := o.Title; v != "" {
+		fields[SpanTitleKey] = v
+	}
+	if v := o.FuncName; v != "" {
+		fields[SpanFunctionKey] = v
 	}
 
 	return newEntry(logrus.WithFields(fields))
 }
 
 // StartSpanWithCall 开始一个追踪单元（回调执行）
-func StartSpanWithCall(ctx context.Context, title, funcName string) func() *Entry {
+func StartSpanWithCall(ctx context.Context, opts ...SpanOption) func() *Entry {
 	return func() *Entry {
-		return StartSpan(ctx, title, funcName)
+		return StartSpan(ctx, opts...)
 	}
+}
+
+// Debugf 写入调试日志
+func Debugf(ctx context.Context, format string, args ...interface{}) {
+	StartSpan(ctx).Debugf(format, args...)
+}
+
+// Infof 写入消息日志
+func Infof(ctx context.Context, format string, args ...interface{}) {
+	StartSpan(ctx).Infof(format, args...)
+}
+
+// Printf 写入消息日志
+func Printf(ctx context.Context, format string, args ...interface{}) {
+	StartSpan(ctx).Printf(format, args...)
+}
+
+// Warnf 写入警告日志
+func Warnf(ctx context.Context, format string, args ...interface{}) {
+	StartSpan(ctx).Warnf(format, args...)
+}
+
+// Errorf 写入错误日志
+func Errorf(ctx context.Context, format string, args ...interface{}) {
+	StartSpan(ctx).Errorf(format, args...)
+}
+
+// Fatalf 写入重大错误日志
+func Fatalf(ctx context.Context, format string, args ...interface{}) {
+	StartSpan(ctx).Fatalf(format, args...)
 }
 
 func newEntry(entry *logrus.Entry) *Entry {
@@ -164,16 +206,7 @@ func newEntry(entry *logrus.Entry) *Entry {
 
 // Entry 定义统一的日志写入方式
 type Entry struct {
-	entry  *logrus.Entry
-	finish int32
-}
-
-// Finish 完成，如果没有触发写入则手动触发Info级别的日志写入
-func (e *Entry) Finish() {
-	if atomic.CompareAndSwapInt32(&e.finish, 0, 1) {
-		e.done()
-		e.entry.Info()
-	}
+	entry *logrus.Entry
 }
 
 func (e *Entry) checkAndDelete(fields map[string]interface{}, keys ...string) {
@@ -187,14 +220,10 @@ func (e *Entry) checkAndDelete(fields map[string]interface{}, keys ...string) {
 // WithFields 结构化字段写入
 func (e *Entry) WithFields(fields map[string]interface{}) *Entry {
 	e.checkAndDelete(fields,
-		StartedAtKey,
 		TraceIDKey,
-		UserIDKey,
-		SpanIDKey,
 		SpanTitleKey,
 		SpanFunctionKey,
-		VersionKey,
-		TimeConsumingKey)
+		VersionKey)
 	return newEntry(e.entry.WithFields(fields))
 }
 
@@ -205,61 +234,30 @@ func (e *Entry) WithField(key string, value interface{}) *Entry {
 
 // Fatalf 重大错误日志
 func (e *Entry) Fatalf(format string, args ...interface{}) {
-	e.done()
 	e.entry.Fatalf(format, args...)
 }
 
 // Errorf 错误日志
 func (e *Entry) Errorf(format string, args ...interface{}) {
-	e.done()
 	e.entry.Errorf(format, args...)
 }
 
 // Warnf 警告日志
 func (e *Entry) Warnf(format string, args ...interface{}) {
-	e.done()
 	e.entry.Warnf(format, args...)
 }
 
 // Infof 消息日志
 func (e *Entry) Infof(format string, args ...interface{}) {
-	e.done()
 	e.entry.Infof(format, args...)
 }
 
 // Printf 消息日志
 func (e *Entry) Printf(format string, args ...interface{}) {
-	e.done()
 	e.entry.Printf(format, args...)
 }
 
 // Debugf 写入调试日志
 func (e *Entry) Debugf(format string, args ...interface{}) {
-	e.done()
 	e.entry.Debugf(format, args...)
-}
-
-func (e *Entry) copyEntry(entry *logrus.Entry) *logrus.Entry {
-	newEntry := logrus.NewEntry(entry.Logger)
-	newEntry.Data = make(logrus.Fields)
-	newEntry.Time = entry.Time
-	newEntry.Level = entry.Level
-	newEntry.Message = entry.Message
-	for k, v := range entry.Data {
-		newEntry.Data[k] = v
-	}
-	return newEntry
-}
-
-func (e *Entry) done() {
-	entry := e.copyEntry(e.entry)
-	entry.Time = time.Now()
-	if v, ok := entry.Data[StartedAtKey]; ok {
-		if startedAt, ok := v.(time.Time); ok {
-			entry.Data[TimeConsumingKey] = entry.Time.Sub(startedAt).Nanoseconds() / 1e3
-			delete(entry.Data, StartedAtKey)
-		}
-	}
-	e.entry = entry
-	atomic.CompareAndSwapInt32(&e.finish, 0, 1)
 }
